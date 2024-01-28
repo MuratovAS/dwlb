@@ -1,3 +1,8 @@
+# This is a fork of [kolunmi/dwlb](https://github.com/kolunmi/dwlb)  
+Things I changed:
+1. Changed color settings for personal use
+
+
 <div align="center">
 <h1>dwlb</h1>
 
