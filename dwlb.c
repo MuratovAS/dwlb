@@ -84,6 +84,8 @@
 	"	-no-center-title		do not center title text on bar\n" \
 	"	-custom-title			do not display window title and treat the area as another status text element; see -title command\n" \
 	"	-no-custom-title		display current window title as normal\n" \
+	"	-active-color-title		title colors will use active colors\n" \
+	"	-no-active-color-title		title colors will use inactive colors\n" \
 	"	-font [FONT]			specify a font\n"	\
 	"	-tags [NUMBER] [FIRST]...[LAST]	if ipc is disabled, specify custom tag names. If NUMBER is 0, then no tag names should be given \n" \
 	"	-vertical-padding [PIXELS]	specify vertical pixel padding above and below text\n" \
@@ -114,6 +116,8 @@
 	"	-h				view this help text\n"
 
 #define TEXT_MAX 2048
+
+enum { WheelUp, WheelDown };
 
 typedef struct {
 	pixman_color_t color;
@@ -452,8 +456,8 @@ draw_frame(Bar *bar)
 	
 	x = draw_text(custom_title ? bar->title.text : bar->window_title,
 		      x, y, foreground, background,
-		      bar->sel ? &active_fg_color : &inactive_fg_color,
-		      bar->sel ? &active_bg_color : &inactive_bg_color,
+		      (bar->sel && active_color_title) ? &active_fg_color : &inactive_fg_color,
+		      (bar->sel && active_color_title) ? &active_bg_color : &inactive_bg_color,
 		      bar->width - status_width, bar->height, 0,
 		      custom_title ? bar->title.colors : NULL,
 		      custom_title ? bar->title.colors_l : 0);
@@ -510,7 +514,6 @@ layer_surface_configure(void *data, struct zwlr_layer_surface_v1 *surface,
 static void
 layer_surface_closed(void *data, struct zwlr_layer_surface_v1 *surface)
 {
-	run_display = false;
 }
 
 static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
@@ -657,7 +660,7 @@ pointer_frame(void *data, struct wl_pointer *pointer)
 		}
 		x += TEXT_WIDTH(tags[i], seat->bar->width - x, seat->bar->textpadding) / buffer_scale;
 	} while (seat->pointer_x >= x && ++i < tags_l);
-	
+
 	if (i < tags_l) {
 		/* Clicked on tags */
 		if (ipc) {
@@ -699,6 +702,7 @@ pointer_frame(void *data, struct wl_pointer *pointer)
 		} else {
 			/* Clicked on status */
 			for (i = 0; i < seat->bar->status.buttons_l; i++) {
+			
 				if (seat->pointer_button == seat->bar->status.buttons[i].btn
 				    && seat->pointer_x >= status_x + seat->bar->textpadding + seat->bar->status.buttons[i].x1 / buffer_scale
 				    && seat->pointer_x < status_x + seat->bar->textpadding + seat->bar->status.buttons[i].x2 / buffer_scale) {
@@ -722,6 +726,25 @@ static void
 pointer_axis_discrete(void *data, struct wl_pointer *pointer,
 		      uint32_t axis, int32_t discrete)
 {
+	uint32_t i;
+	uint32_t btn = discrete < 0 ? WheelUp : WheelDown;
+	Seat *seat = (Seat *)data;
+
+	if (!seat->bar)
+		return;
+
+	uint32_t status_x = seat->bar->width / buffer_scale - TEXT_WIDTH(seat->bar->status.text, seat->bar->width, seat->bar->textpadding) / buffer_scale;
+	if (seat->pointer_x > status_x) {
+		/* Clicked on status */
+		for (i = 0; i < seat->bar->status.buttons_l; i++) {
+			if (btn == seat->bar->status.buttons[i].btn
+			    && seat->pointer_x >= status_x + seat->bar->textpadding + seat->bar->status.buttons[i].x1 / buffer_scale
+			    && seat->pointer_x < status_x + seat->bar->textpadding + seat->bar->status.buttons[i].x2 / buffer_scale) {
+				shell_command(seat->bar->status.buttons[i].command);
+				break;
+			}
+		}
+	}
 }
 
 static void
@@ -1259,6 +1282,8 @@ parse_into_customtext(CustomText *ct, char *text)
 		Button *left_button = NULL;
 		Button *middle_button = NULL;
 		Button *right_button = NULL;
+		Button *scrollup_button = NULL;
+		Button *scrolldown_button = NULL;
 	
 		for (char *p = text; *p && str_pos < sizeof(ct->text) - 1; p++) {
 			if (state == UTF8_ACCEPT && *p == '^') {
@@ -1318,6 +1343,26 @@ parse_into_customtext(CustomText *ct, char *text)
 							snprintf(right_button->command, sizeof right_button->command, "%s", arg);
 							right_button->x1 = x;
 						}
+					} else if (!strcmp(p, "us")) {
+						if (scrollup_button) {
+							scrollup_button->x2 = x;
+							scrollup_button = NULL;
+						} else if (*arg) {
+							ARRAY_APPEND(ct->buttons, ct->buttons_l, ct->buttons_c, scrollup_button);
+							scrollup_button->btn = WheelUp;
+							snprintf(scrollup_button->command, sizeof scrollup_button->command, "%s", arg);
+							scrollup_button->x1 = x;
+						}
+					} else if (!strcmp(p, "ds")) {
+						if (scrolldown_button) {
+							scrolldown_button->x2 = x;
+							scrolldown_button = NULL;
+						} else if (*arg) {
+							ARRAY_APPEND(ct->buttons, ct->buttons_l, ct->buttons_c, scrolldown_button);
+							scrolldown_button->btn = WheelDown;
+							snprintf(scrolldown_button->command, sizeof scrolldown_button->command, "%s", arg);
+							scrolldown_button->x1 = x;
+						}
 					} 
 
 					*--arg = '(';
@@ -1351,6 +1396,11 @@ parse_into_customtext(CustomText *ct, char *text)
 			middle_button->x2 = x;
 		if (right_button)
 			right_button->x2 = x;
+		if (scrollup_button)
+			scrollup_button->x2 = x;
+		if (scrolldown_button)
+			scrolldown_button->x2 = x;
+	
 		
 		ct->text[str_pos] = '\0';
 	} else {
@@ -1719,6 +1769,10 @@ main(int argc, char **argv)
 			custom_title = true;
 		} else if (!strcmp(argv[i], "-no-custom-title")) {
 			custom_title = false;
+		} else if (!strcmp(argv[i], "-active-color-title")) {
+			active_color_title = true;
+		} else if (!strcmp(argv[i], "-no-active-color-title")) {
+			active_color_title = false; 
 		} else if (!strcmp(argv[i], "-font")) {
 			if (++i >= argc)
 				DIE("Option -font requires an argument");
